@@ -26,9 +26,11 @@ Mysterium is a **decentralized VPN** with **20,000+ residential IPs** across **1
 |------|------|
 | MYST token price | ~$0.12 USD |
 | Data cost | ~0.1-0.3 MYST per GB (~$0.01-0.04/GB) |
-| **Minimum to start** | **~10 MYST (~$1.20)** |
-| AI coding (50-100 MB/day) | **~5-10 years** on 10 MYST |
+| **Minimum to start** | **~1 MYST (~$0.12)** — yes, that's it |
+| AI coding (50-100 MB/day) | **months/years** on 10 MYST (~$1.20) |
 | No subscription, no monthly fee | Pay only for what you use |
+
+**You can start with as little as 1 MYST (~$0.12).** It won't last long (maybe a few days of light coding), but it's enough to test. For serious use, 10-20 MYST (~$1.20-2.40) lasts years.
 
 **No starter pack required.** Buy MYST on any exchange (Coinbase, Kraken, MEXC, etc.), send to your Mysterium wallet address, and you're ready.
 
@@ -43,7 +45,7 @@ Mysterium is a **decentralized VPN** with **20,000+ residential IPs** across **1
 3. Send MYST to your Mysterium wallet address (shown in the app/CLI)
 4. Done — pay-as-you-go, no subscription
 
-> **Want free MYST?** Run a [MystNodes](https://www.mystnodes.com) node and share unused bandwidth to earn MYST. No technical skills needed — runs on Raspberry Pi, Docker, or desktop.
+> **Want to earn free MYST?** Run a [MystNodes](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97) node and share unused bandwidth to earn MYST. No technical skills needed — runs on Raspberry Pi, Docker, or desktop. Sign up with [this link](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97) to support this project.
 
 ### 2. Install mystvpn CLI
 
@@ -189,13 +191,13 @@ docker run --cap-add NET_ADMIN -d -p 4449:4449 \
   service --agreed-terms-and-conditions
 ```
 
-Or use [MystNodes](https://www.mystnodes.com) for a GUI installer (Windows/Mac/Linux/Android).
+Or use [MystNodes](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97) for a GUI installer (Windows/Mac/Linux/Android). **[Sign up with this link](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97) to support this project.**
 
 ### Links
 
 - [Mysterium VPN](https://www.mysteriumvpn.com) — consumer VPN
 - [Mysterium Dark](https://www.mysteriumdark.com) — pay-as-you-go with crypto/card
-- [MystNodes](https://www.mystnodes.com) — run a node, earn MYST
+- [MystNodes](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97) — run a node, earn MYST ([referral link](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97))
 - [Mysterium Network](https://www.mysterium.network) — protocol & infrastructure
 - [Docs](https://docs.mysterium.network) — technical documentation
 - [Discord](https://discord.com/invite/n3vtSwc) — community
@@ -203,13 +205,12 @@ Or use [MystNodes](https://www.mystnodes.com) for a GUI installer (Windows/Mac/L
 
 ---
 
-## Affiliate / Referral
+## Support This Project
 
-> **Want to support this project?**
->
-> If you sign up for Mysterium VPN through [this link](https://www.mysteriumvpn.com) or use referral code `YOUR_CODE_HERE`, you support the development of this open-source rotator.
->
-> Mysterium also has an [affiliate program](https://www.mysteriumvpn.com/affiliates) (up to 50% commission) if you want to earn from referrals.
+- ⭐ Star this repo
+- Run a [MystNodes](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97) node ([referral link](https://mystnodes.co/?referral_code=NhzVTqGyKZcjPDLRdBE2Vw8lJRkkZSnzkbvrrJ97)) — earn MYST while helping the network
+- Sign up for [Mysterium VPN](https://www.mysteriumvpn.com) (consumer VPN, separate from CLI)
+- Share this project with others who use AI coding tools
 
 ---
 
