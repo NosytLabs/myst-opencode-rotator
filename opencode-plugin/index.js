@@ -1,122 +1,134 @@
 /**
- * Mysterium IP Rotator — OpenCode Plugin
+ * myst-rotator — OpenCode plugin
  *
- * Automatically rotates residential IPs via Mysterium VPN when
- * the AI provider returns a 429 (rate limited) error.
+ * Routes OpenCode model traffic through a Mysterium residential exit and lets the
+ * user rotate the exit IP on demand (or when a rate limit hits).
  *
- * Requires:
- *   - Mysterium node running in consumer mode (Docker)
- *   - myst-rotator CLI installed (see main README)
- *   - MYST tokens + POL gas in the identity wallet
+ * Verified against the live OpenCode plugin runtime (v2 API). The domains that
+ * actually exist at setup time are:
  *
- * Installation:
- *   opencode plugin myst-rotator
+ *   options, agent, aisdk, catalog, command, integration, plugin, reference, skill
  *
- * Or manually:
- *   Add to ~/.config/opencode/opencode.json:
- *   { "plugin": ["myst-rotator"] }
+ * There is NO `session` domain and therefore no `retry` hook in this build, so a
+ * plugin cannot transparently catch a 429 and retry by itself. Rotation is exposed
+ * as a slash command instead, and the proxy env is applied at load so all model
+ * traffic leaves through the residential exit from the start.
+ *
+ * Users only need: Docker + a funded Mysterium identity (MYST tokens).
+ * No VPN client, no Mullvad, no split-tunnel configuration.
  */
 
-import { execSync } from "child_process"
+import { Plugin } from "@opencode/plugin"
 
-const ROTATOR = "myst-rotator"
-const MAX_ROTATIONS = 3
-const ROTATION_COOLDOWN_MS = 30_000 // 30s between rotations
+/** Loopback control socket published by `myst-rotator serve`. */
+const CONTROL_URL = process.env.MYST_ROTATOR_CONTROL || "http://127.0.0.1:8787"
 
-let lastRotation = 0
-let rotationCount = 0
+/** Proxy env vars that point child processes at the residential exit. */
+const PROXY_KEYS = [
+  "HTTP_PROXY",
+  "http_proxy",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+]
 
-function rotateIP() {
-  const now = Date.now()
-  if (now - lastRotation < ROTATION_COOLDOWN_MS) {
-    console.warn("[myst-rotator] Cooldown active, skipping rotation")
-    return false
-  }
-  if (rotationCount >= MAX_ROTATIONS) {
-    console.warn(`[myst-rotator] Max rotations (${MAX_ROTATIONS}) reached, giving up`)
-    return false
-  }
+/** Loopback must never go through the proxy. */
+const NO_PROXY = "localhost,127.0.0.1,::1"
 
+/** GET /status from the control socket. Returns null when there is no session. */
+async function readStatus() {
   try {
-    console.log("[myst-rotator] Rate limited — rotating residential IP...")
-    execSync(`${ROTATOR} rotate`, { timeout: 60_000, stdio: "inherit" })
-    lastRotation = Date.now()
-    rotationCount++
-    console.log(`[myst-rotator] IP rotated (attempt ${rotationCount}/${MAX_ROTATIONS})`)
-    return true
-  } catch (err) {
-    console.error("[myst-rotator] Rotation failed:", err.message)
-    return false
+    const res = await fetch(`${CONTROL_URL}/status`)
+    if (!res.ok) return null
+    const body = await res.json()
+    if (!body.connected || !body.proxy) return null
+    return { proxy: body.proxy, ip: body.ip || "?", country: body.country || "?" }
+  } catch {
+    return null
   }
 }
 
-function resetRotations() {
-  rotationCount = 0
+/** POST /rotate: connect to a new residential exit, return its endpoint. */
+async function rotate() {
+  const res = await fetch(`${CONTROL_URL}/rotate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: "myst-rotator command" }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`${res.status} ${text}`)
+  }
+  const body = await res.json()
+  if (!body.proxy) throw new Error("rotate returned no proxy endpoint")
+  return { proxy: body.proxy, ip: body.ip || "?", country: body.country || "?" }
 }
 
-function isRateLimitError(error) {
-  if (!error) return false
-  const msg = (error.message || error.toString || "").toLowerCase()
-  const status = error.status || error.statusCode || error.response?.status
-  return (
-    status === 429 ||
-    msg.includes("429") ||
-    msg.includes("rate limit") ||
-    msg.includes("rate_limit") ||
-    msg.includes("too many requests") ||
-    msg.includes("quota exceeded") ||
-    msg.includes("resource_exhausted")
-  )
-}
-
-/**
- * OpenCode plugin entry point.
- *
- * Hooks into the chat/completion lifecycle to catch 429 errors
- * and rotate the IP before retrying.
- */
-export async function MystRotatorPlugin({ client, project, directory, worktree }) {
-  console.log("[myst-rotator] Plugin loaded — auto-rotation on 429 enabled")
-
-  return {
-    // Hook: before chat completion
-    "chat.params": async (input, output) => {
-      // Reset rotation count on new request
-      resetRotations()
-    },
-
-    // Hook: on chat error (catches 429s)
-    "chat.error": async (input, output) => {
-      const error = output?.error || input?.error
-      if (isRateLimitError(error)) {
-        console.warn("[myst-rotator] 429 detected, rotating IP...")
-        const rotated = rotateIP()
-        if (rotated) {
-          // Signal that the request should be retried
-          output.retry = true
-          output.error = null
-        }
-      }
-    },
-
-    // Hook: tool execution error (catches 429s from tool calls)
-    "tool.error": async (input, output) => {
-      const error = output?.error
-      if (isRateLimitError(error)) {
-        console.warn("[myst-rotator] Tool 429 detected, rotating IP...")
-        const rotated = rotateIP()
-        if (rotated) {
-          output.retry = true
-          output.error = null
-        }
-      }
-    },
-
-    // Hook: on successful completion (reset rotation count)
-    "chat.completed": async (input, output) => {
-      resetRotations()
-    },
+/** Point this process at the residential exit. Returns a restore function. */
+function applyProxy(proxy) {
+  const previous = Object.fromEntries(PROXY_KEYS.map((key) => [key, process.env[key]]))
+  for (const key of PROXY_KEYS) process.env[key] = proxy
+  process.env.NO_PROXY = NO_PROXY
+  process.env.no_proxy = NO_PROXY
+  return () => {
+    for (const key of PROXY_KEYS) {
+      const value = previous[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 }
 
-export default MystRotatorPlugin
+export default Plugin.define({
+  id: "myst-rotator",
+
+  async setup(ctx) {
+    const baseline = { ...process.env }
+    let restore = () => {}
+
+    // 1. Apply the residential proxy for this process so every provider call
+    //    leaves through Mysterium. If no session is up, say so and continue.
+    const status = await readStatus()
+    if (status) {
+      restore = applyProxy(status.proxy)
+      console.log(
+        `[myst-rotator] Routing through ${status.ip} (${status.country}) via ${status.proxy}`,
+      )
+    } else {
+      console.log(
+        "[myst-rotator] No active Mysterium session. Run: myst-rotator connect",
+      )
+    }
+
+    // 2. Slash command: rotate now, and see the new exit.
+    try {
+      await ctx.command.transform((draft) => {
+        draft.add({
+          name: "myst",
+          description:
+            "Rotate the Mysterium residential exit IP (and show the new IP)",
+          execute: async () => {
+            let text
+            try {
+              const next = await rotate()
+              restore()
+              restore = applyProxy(next.proxy)
+              text = `myst-rotator: now routing through ${next.ip} (${next.country})`
+              console.log(`[myst-rotator] ${text}`)
+            } catch (error) {
+              text = `myst-rotator: rotate failed: ${String(error)}`
+              console.log(`[myst-rotator] ${text}`)
+            }
+            return text
+          },
+        })
+      })
+    } catch (error) {
+      console.log(`[myst-rotator] Could not register /myst command: ${String(error)}`)
+    }
+
+    // 3. Restore the original proxy env when the plugin unloads.
+    return () => restore()
+  },
+})

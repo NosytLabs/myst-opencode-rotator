@@ -17,15 +17,16 @@ elif docker ps -a --format '{{.Names}}' | grep -q '^myst$'; then
   echo "  Starting existing myst node..."
   docker start myst
 else
-  echo "  Creating myst node (consumer mode)..."
+  echo "  Creating myst node (consumer + proxy mode)..."
   docker run -d \
     --cap-add NET_ADMIN \
-    --net host \
+    --device /dev/net/tun:/dev/net/tun \
+    -p 127.0.0.1:4050:4050 \
     --name myst \
     --restart unless-stopped \
     -v myst-data:/var/lib/mysterium-node \
     mysteriumnetwork/myst:latest \
-    daemon
+    --proxymode daemon
   echo "  Node started. Waiting for TequilAPI..."
   sleep 5
 fi
@@ -75,6 +76,9 @@ echo "Next: run the guided setup (creates/uses identity, funds, registers on-cha
 echo "  myst-rotator setup"
 echo ""
 echo "Then:"
-echo "  myst-rotator connect --country US   # connect to residential IP"
-echo "  myst-rotator rotate                 # rotate to new IP"
-echo "  myst-rotator daemon --interval 600  # auto-rotate every 10 min"
+echo "  myst-rotator connect                  # connect to a residential exit"
+echo "  myst-rotator rotate                   # rotate to a new exit/IP"
+echo "  myst-rotator serve                    # control socket for the OpenCode plugin"
+echo ""
+echo "OpenCode plugin (auto-routes model traffic + /myst command):"
+echo "  See README.md -> 'OpenCode plugin'"

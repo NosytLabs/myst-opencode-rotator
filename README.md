@@ -41,33 +41,40 @@ Mysterium is a **decentralized VPN** with **20,000+ residential IPs** across **1
 ## Quick Start
 
 ```bash
-# 1. Install the node + rotator (Docker + Foundry)
+# 1. Install the node + rotator (Docker)
 curl -fsSL https://raw.githubusercontent.com/NosytLabs/myst-opencode-rotator/main/install.sh | bash
 
-# 2. Guided setup — creates identity, tells you where to send MYST + POL, registers on-chain
-myst-rotator setup
+# 2. Start the node + rotator, then guided setup
+myst-rotator up
+myst-rotator setup      # creates identity, tells you where to send MYST + POL
 
-# 3. Connect
-myst-rotator connect --country US
-curl ifconfig.me   # your new residential IP
+# 3. Connect and install the OpenCode plugin
+myst-rotator connect
+myst-rotator serve &    # control socket for the plugin
 ```
 
-`myst-rotator setup` walks you through everything (identity creation, funding
-address, on-chain registration via the transactor workaround below). Manual steps
-follow if you prefer.
+That's it. **No VPN client required** — you never touch Mullvad, WireGuard, or
+split-tunnel settings. You just need **MYST tokens** (plus a little POL for gas).
 
-### 1. Start the Mysterium node (Docker — easiest)
+Your traffic leaves through a residential IP; your own connection is untouched.
+
+### 1. Start the Mysterium node (Docker)
 
 ```bash
 docker run -d \
   --cap-add NET_ADMIN \
-  --net host \
+  --device /dev/net/tun:/dev/net/tun \
+  -p 127.0.0.1:4050:4050 \
   --name myst \
   --restart unless-stopped \
   -v myst-data:/var/lib/mysterium-node \
   mysteriumnetwork/myst:latest \
-  daemon
+  --proxymode daemon
 ```
+
+The `--proxymode` flag makes the node expose a **local HTTP proxy** (on a
+loopback port) that carries only the traffic you point at it. The node runs in
+its own network namespace, so it never rewrites your host's routing table.
 
 This runs in **consumer mode** — it's a VPN client, not a provider. It does NOT share your bandwidth.
 
@@ -192,45 +199,68 @@ myst-rotator disconnect
 
 ## OpenCode Integration
 
-### Option A: System-wide (simplest)
+The plugin (`opencode-plugin/`) routes **all** OpenCode model traffic through the
+Mysterium residential exit and adds a `/myst` command to rotate the exit IP.
+
+### Install
 
 ```bash
-# Connect once, then just use OpenCode normally
-myst-rotator connect --country US
-opencode run -m "opencode/minimax-m3.1-flash-free" "hello"
+# 1. Symlink the plugin into OpenCode's plugin directory
+mkdir -p ~/.config/opencode/plugins
+ln -sfn "$PWD/opencode-plugin" ~/.config/opencode/plugins/myst-rotator
+
+# 2. Start the control socket the plugin talks to
+myst-rotator serve &
 ```
 
-### Option B: With the OpenCode plugin (auto-rotate on 429)
-
-The `opencode-plugin/` directory contains an OpenCode plugin that automatically
-rotates your IP when a 429 (rate limit) error is hit.
-
-**Install:**
+### Verify
 
 ```bash
-# Method 1: npm (after publishing)
-opencode plugin myst-rotator
-
-# Method 2: Local install
-cd myst-opencode-rotator/opencode-plugin
-npm install
-npm link  # or: ln -s $(pwd) ~/.config/opencode/node_modules/myst-rotator
+# Model traffic now leaves through the residential exit, not your ISP
+curl -s -x http://127.0.0.1:$(myst-rotator status | grep -oP '"proxy": "\K[^"]+' | grep -oP ':\K[0-9]+') https://ipinfo.io/json
 ```
 
-**Configure in `~/.config/opencode/opencode.json`:**
+Then start OpenCode. You should see, on load:
 
-```json
-{
-  "plugin": ["myst-rotator"]
-}
+```
+[myst-rotator] Routing through 94.154.102.62 (PL) via http://127.0.0.1:40815
 ```
 
-The plugin hooks into OpenCode's `chat.error` and `tool.error` events.
-When a 429 is detected, it calls `myst-rotator rotate` and retries the request.
+Run `/myst` in any session to rotate to a different residential IP.
 
-### Option C: Split tunnel (advanced)
+### What the plugin does and does not do
 
-Only route OpenCode traffic through the WireGuard interface using `ip rule` + `ip route`. Your other traffic stays on your normal connection.
+Verified against the live OpenCode plugin runtime (v2 API). At setup time the
+available domains are:
+
+```
+options, agent, aisdk, catalog, command, integration, plugin, reference, skill
+```
+
+- **Does:** apply `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` for the process at load,
+  so every provider call leaves through the residential exit. Exposes `/myst` to
+  rotate and report the new exit.
+- **Does not:** auto-retry a 429 on its own. This OpenCode build exposes **no
+  `session` domain and no `retry` hook** (`ctx.session` is `undefined`), so a
+  plugin cannot catch the 429 and re-issue the request by itself. Rotation on
+  rate limit is a manual `/myst` (or `myst-rotator rotate`) — the IP change is
+  what clears an IP-scoped rate limit.
+
+This matches the upstream `opencode-tunnel-switch` design, whose `retry` hook
+exists only in builds that expose `ctx.session.hook`.
+
+### Rate limits worth knowing
+
+Two different kinds, and only one is fixed by rotating IPs:
+
+| Where | 429 cause | Fixed by rotating IP? |
+|---|---|---|
+| OpenCode free models (`opencode/...-free`) | IP-based rate limit | **Yes** |
+| AntSeed free models (`antseed/...-free`) | Account/stake-based (`free_tier_exhausted`) | **No** — needs a stake, not a new IP |
+
+If a 429 body says `free_tier_exhausted` and mentions staking ANTS, that is an
+account limit. A new residential IP will not help; stake tokens in that
+seller's pool instead.
 
 ---
 
@@ -347,10 +377,21 @@ left after the transactor fee.
 
 ## VPN / P2P note
 
-The node needs direct UDP for its DHT/P2P layer. If you run a system VPN (Mullvad
-etc.) it can block P2P dials ("too few connections were built"). Allow the `myst`
-container outside the VPN (split tunnel / `mullvad-exclude`) or pause the VPN while
-connecting.
+The node needs direct UDP for its DHT/P2P layer. On a host with a **system-wide
+kill-switch VPN** (Mullvad lockdown mode, for example) outbound UDP from the
+container is dropped by the firewall, and P2P dials fail with
+`p2p dialer failed` / `too few connections were built`.
+
+Two ways to handle it, in order of preference:
+
+1. **Recommended — no changes needed.** This project runs the node in its own
+   network namespace with `--proxymode`, so nothing touches your host's routing
+   table. Only the plugin's proxy traffic is affected by your VPN, and only if
+   your VPN blocks the residential exit's port.
+2. **If P2P dials still fail**, allow the `myst` container outside the VPN
+   (`mullvad split-tunnel add <pid>`, or your VPN's split-tunnel setting), or
+   pause the VPN while connecting. This is a host-specific workaround, never a
+   requirement for other users.
 
 ---
 
@@ -358,12 +399,14 @@ connecting.
 
 | Issue | Fix |
 |-------|-----|
-| `Connection refused` | Start the node: `docker start myst` |
+| `Connection refused` | Start the node: `myst-rotator up` |
 | `No identity` | Run: `myst-rotator identity` |
 | `insufficient balance` | Send MYST + POL to your identity on Polygon |
 | `registration InProgress` | Needs POL for gas. Send ~0.1 POL on Polygon |
-| `no residential proposals` | Try a different country: `myst-rotator connect --country US` |
-| `rate limited even with VPN` | Service may block all VPN IP ranges; try a different country |
+| `no residential proposals` | Try another country: `myst-rotator connect --country US` |
+| `p2p dialer failed` / `too few connections` | See "VPN / P2P note" above |
+| `/myst` says rotate failed | Check the node is up and funded: `myst-rotator status` |
+| Plugin logs no routing line | No active session — run `myst-rotator connect`, then restart OpenCode |
 | Docker not running | `sudo systemctl start docker` |
 
 ---

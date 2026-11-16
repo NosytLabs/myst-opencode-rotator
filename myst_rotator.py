@@ -72,6 +72,12 @@ PREFERRED_COUNTRIES = [
 ]
 
 
+CONTROL_HOST = os.environ.get("MYST_ROTATOR_CONTROL_HOST", "127.0.0.1")
+CONTROL_PORT = int(os.environ.get("MYST_ROTATOR_CONTROL_PORT", "8787"))
+# Ports the node itself owns; the proxy is whichever other port it listens on.
+NODE_OWNED_PORTS = {4050, 4449}
+
+
 def ensure_config_dir():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -115,6 +121,17 @@ def get_public_ip() -> str:
                     return ip
         except Exception:
             continue
+    for url in ("https://ifconfig.me", "https://icanhazip.com"):
+        try:
+            out = subprocess.run(
+                ["curl", "-4", "-s", "--max-time", "5", url],
+                capture_output=True, text=True, timeout=8,
+            )
+            ip = out.stdout.strip()
+            if ip and len(ip) < 50 and " " not in ip:
+                return ip
+        except Exception:
+            continue
     return "unknown"
 
 
@@ -145,10 +162,21 @@ def get_identity() -> str | None:
             return saved
     result = api("GET", "/identities")
     if isinstance(result, dict) and result.get("identities"):
-        identity_id = result["identities"][0]["id"]
-        ensure_config_dir()
-        IDENTITY_FILE.write_text(identity_id)
-        return identity_id
+        chosen = None
+        for item in result["identities"]:
+            iid = item.get("id")
+            if not iid:
+                continue
+            info = get_identity_info(iid)
+            if info.get("registration_status") == "Registered":
+                chosen = iid
+                break
+        if chosen is None:
+            chosen = result["identities"][0].get("id")
+        if chosen:
+            ensure_config_dir()
+            IDENTITY_FILE.write_text(chosen)
+            return chosen
     return None
 
 
@@ -193,11 +221,12 @@ def get_connection_status() -> dict:
     result = api("GET", "/connection")
     if "error" in result:
         return {"connected": False, "error": result["error"]}
-    loc = result.get("location") or {}
+    proposal = result.get("proposal") or {}
+    loc = proposal.get("location") or result.get("location") or {}
     return {
         "connected": result.get("status") == "Connected",
         "consumer_id": result.get("consumer_id"),
-        "provider_id": result.get("provider_id"),
+        "provider_id": result.get("provider_id") or proposal.get("provider_id"),
         "country": loc.get("country"),
         "ip": result.get("ip"),
     }
@@ -209,10 +238,18 @@ def get_proposals(country=None) -> list:
         path += f"&country_code={country}"
     result = api("GET", path)
     if isinstance(result, dict) and "proposals" in result:
-        return result["proposals"]
+        proposals = result["proposals"]
     elif isinstance(result, list):
-        return result
-    return []
+        proposals = result
+    else:
+        proposals = []
+    if country and proposals:
+        want = str(country).upper()
+        filtered = [pp for pp in proposals
+                    if str(pp.get("location", {}).get("country", "")).upper() == want]
+        if filtered:
+            proposals = filtered
+    return proposals
 
 
 # ---------------------------------------------------------------------------
@@ -421,8 +458,261 @@ def register_identity(identity_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Proxy discovery + control socket (used by the OpenCode plugin)
+# ---------------------------------------------------------------------------
+
+def _myst_pid() -> int | None:
+    """PID of the myst container, or None when Docker is not available."""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "myst", "--format", "{{.State.Pid}}"],
+            capture_output=True, text=True, timeout=8,
+        )
+        pid = int(out.stdout.strip())
+        return pid or None
+    except Exception:
+        return None
+
+
+def _ports_from_ss(pid: int) -> list[int]:
+    """Listening ports of a PID via `ss`.
+
+    Sockets owned by another user (a root-owned container process) are only
+    visible to root, so this runs both plain and sudo-elevated `ss` and merges
+    the results. `ss` without root still exits 0, so a single call is not enough.
+    """
+    ports: set[int] = set()
+    for cmd in (["ss", "-ltnpH"], ["sudo", "-n", "ss", "-ltnpH"]):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except Exception:
+            continue
+        if result.returncode != 0 or not result.stdout:
+            continue
+        for line in result.stdout.splitlines():
+            # ss renders the owning process as users:(("name",pid=1234,fd=7))
+            if f"pid={pid}," not in line and f"pid={pid})" not in line:
+                continue
+            fields = line.split()
+            if not fields:
+                continue
+            try:
+                ports.add(int(fields[3].rsplit(":", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+    return sorted(ports)
+
+
+def _listening_ports(pid: int) -> list[int]:
+    """TCP ports this PID listens on. Tries /proc first, then `ss`."""
+    ports: list[int] = []
+    inodes: set[str] = set()
+    fd_dir = Path(f"/proc/{pid}/fd")
+    try:
+        for fd in fd_dir.iterdir():
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("socket:["):
+                inodes.add(target[8:-1])
+    except OSError:
+        inodes = set()
+    if inodes:
+        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                lines = Path(table).read_text().splitlines()[1:]
+            except OSError:
+                continue
+            for line in lines:
+                fields = line.split()
+                if len(fields) < 10 or fields[3] != "0A":  # 0A = LISTEN
+                    continue
+                if fields[9] not in inodes:
+                    continue
+                try:
+                    ports.append(int(fields[1].split(":")[1], 16))
+                except (IndexError, ValueError):
+                    continue
+    if ports:
+        return sorted(set(ports))
+    return sorted(set(_ports_from_ss(pid)))
+
+
+def discover_proxy_port() -> int | None:
+    """The node's HTTP proxy port. In --proxymode the node binds 127.0.0.1:<port>.
+
+    The port is ephemeral (the log says "Starting proxy server at 127.0.0.1:0"),
+    so it is discovered from the listening sockets of the myst process, ignoring
+    the ports the node owns itself.
+    """
+    pid = _myst_pid()
+    if pid is None:
+        return None
+    candidates = [p for p in _listening_ports(pid) if p not in NODE_OWNED_PORTS]
+    return candidates[0] if candidates else None
+
+
+def proxy_endpoint() -> str | None:
+    port = discover_proxy_port()
+    return f"http://127.0.0.1:{port}" if port else None
+
+
+def exit_ip_via_proxy(proxy: str) -> str | None:
+    """Public IP as seen through the residential exit, or None on failure."""
+    try:
+        out = subprocess.run(
+            ["curl", "-s", "--max-time", "15", "-x", proxy, "https://api.ipify.org"],
+            capture_output=True, text=True, timeout=20,
+        )
+        ip = out.stdout.strip()
+        return ip if ip and len(ip) < 50 and " " not in ip else None
+    except Exception:
+        return None
+
+
+def control_status() -> dict:
+    """Snapshot the plugin needs: connected?, proxy url, exit IP, country."""
+    status = get_connection_status()
+    connected = bool(status.get("connected"))
+    proxy = proxy_endpoint() if connected else None
+    country = status.get("country") or "?"
+    exit_ip = exit_ip_via_proxy(proxy) if proxy else None
+    return {
+        "connected": connected,
+        "proxy": proxy,
+        "ip": exit_ip or status.get("ip") or "?",
+        "country": country,
+        "identity": get_identity(),
+    }
+
+
+def control_rotate(reason: str = "") -> dict:
+    """Rotate to a new residential exit and return the new proxy endpoint."""
+    if not rotate():
+        raise RuntimeError("rotation failed: no new residential exit")
+    result = control_status()
+    if not result.get("proxy"):
+        raise RuntimeError("rotated but no proxy endpoint available")
+    return result
+
+
+def cmd_up(args):
+    """Start the Mysterium node in proxy mode (own network namespace)."""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "myst", "--format", "{{.State.Running}}"],
+            capture_output=True, text=True, timeout=8,
+        )
+        running = out.stdout.strip() == "true"
+    except Exception:
+        running = False
+    if running:
+        print("Mysterium node is already running.")
+        return
+    docker_cmd = [
+        "docker", "run", "-d",
+        "--name", "myst",
+        "--cap-add", "NET_ADMIN",
+        "--device", "/dev/net/tun:/dev/net/tun",
+        "-p", "127.0.0.1:4050:4050",
+        "--restart", "unless-stopped",
+        "-v", "myst-data:/var/lib/mysterium-node",
+        "mysteriumnetwork/myst:latest",
+        "--proxymode", "daemon",
+    ]
+    result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        # Container exists but stopped -> just start it.
+        if "Conflict" in stderr or "already in use" in stderr:
+            subprocess.run(["docker", "start", "myst"], timeout=60)
+        else:
+            print(f"Failed to start the node:\n{stderr}", file=sys.stderr)
+            sys.exit(1)
+    print("Mysterium node started. Wait a few seconds, then run: myst-rotator setup")
+
+
+def cmd_serve(args):
+    """Loopback control socket for the OpenCode plugin (/status, /rotate)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format, *args):  # noqa: A002 - match base signature
+            pass  # keep stdout clean for opencode
+
+        def _send(self, code: int, payload: dict):
+            body = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path.split("?")[0] == "/status":
+                try:
+                    self._send(200, control_status())
+                except Exception as exc:
+                    self._send(500, {"error": str(exc)})
+            else:
+                self._send(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path.split("?")[0] != "/rotate":
+                self._send(404, {"error": "not found"})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            reason = ""
+            if length:
+                try:
+                    reason = (json.loads(self.rfile.read(length)) or {}).get("reason", "")
+                except Exception:
+                    reason = ""
+            try:
+                self._send(200, control_rotate(reason))
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
+    server = ThreadingHTTPServer((CONTROL_HOST, CONTROL_PORT), Handler)
+    log(f"Control socket listening on http://{CONTROL_HOST}:{CONTROL_PORT}")
+    print(f"myst-rotator control socket: http://{CONTROL_HOST}:{CONTROL_PORT}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+def _active_proxy() -> str | None:
+    """The current proxy endpoint, if a session is up and listening."""
+    if not get_connection_status().get("connected"):
+        return None
+    return proxy_endpoint()
+
+
+def exit_ip() -> str:
+    """Public IP as seen THROUGH the residential exit.
+
+    Reading the host IP is wrong here: the rotator's whole purpose is that model
+    traffic leaves via the residential exit, while the host keeps its own route.
+    Falls back to the host IP only when no proxy is up yet.
+    """
+    proxy = _active_proxy()
+    if proxy:
+        ip = exit_ip_via_proxy(proxy)
+        if ip:
+            return ip
+    return get_public_ip()
+
 
 def connect_to(country=None, identity_id=None) -> bool:
     if not check_node():
@@ -463,18 +753,26 @@ def connect_to(country=None, identity_id=None) -> bool:
         msg = result["error"].get("message", "unknown")
         log(f"Connect failed: {msg}")
         if "p2p" in msg.lower() or "dial" in msg.lower():
-            log("Hint: P2P dial failures are usually the host VPN (Mullvad) blocking "
-                "UDP or DNS. Allow the myst node outside the VPN, or retry.")
+            log("Hint: P2P dial failures are usually the host VPN blocking UDP or "
+                "DNS. Retry, or check that outbound UDP is allowed.")
         return False
     time.sleep(5)
     status = get_connection_status()
-    if status.get("connected"):
-        ip = get_public_ip()
-        log(f"Connected! IP: {ip} (country: {prop_country}, ISP: {prop_isp})")
-        return True
-    else:
+    if not status.get("connected"):
         log(f"Connection pending. Status: {status}")
         return True
+    ip = exit_ip()
+    for _ in range(5):
+        if ip and ip != "unknown":
+            break
+        time.sleep(2)
+        ip = exit_ip()
+    if ip == "unknown":
+        log("Connected to provider but no internet egress; disconnecting.")
+        disconnect()
+        return False
+    log(f"Connected! Exit IP: {ip} (country: {prop_country}, ISP: {prop_isp})")
+    return True
 
 
 def disconnect() -> bool:
@@ -493,7 +791,7 @@ def disconnect() -> bool:
 def rotate() -> bool:
     old_status = get_connection_status()
     old_country = old_status.get("country")
-    old_ip = get_public_ip()
+    old_ip = exit_ip()
 
     disconnect()
     time.sleep(2)
@@ -504,7 +802,7 @@ def rotate() -> bool:
     for country in candidates[:5]:
         log(f"Trying country: {country}")
         if connect_to(country=country):
-            new_ip = get_public_ip()
+            new_ip = exit_ip()
             if new_ip != old_ip and new_ip != "unknown":
                 log(f"Rotation successful: {old_ip} -> {new_ip} (country: {country})")
                 return True
@@ -581,8 +879,7 @@ def cmd_register(args):
 def cmd_connect(args):
     country = args.country or random.choice(PREFERRED_COUNTRIES)
     if connect_to(country=country):
-        ip = get_public_ip()
-        print(f"Connected to residential IP: {ip} (country: {country})")
+        print(f"Connected to residential exit: {exit_ip()} (country: {country})")
     else:
         print("Failed to connect. Check: myst-rotator balance", file=sys.stderr)
         sys.exit(1)
@@ -605,12 +902,15 @@ def cmd_disconnect(args):
 
 def cmd_status(args):
     status = get_connection_status()
-    ip = get_public_ip()
+    ip = exit_ip()
     identity_id = get_identity()
     balance = get_balance(identity_id) if identity_id else {}
+    _country = status.get("country")
+    if not _country:
+        _country = status.get("proposal", {}).get("location", {}).get("country")
     output = {
         "connected": status.get("connected", False),
-        "country": status.get("country"),
+        "country": _country,
         "provider_id": status.get("provider_id"),
         "public_ip": ip,
         "identity": identity_id,
@@ -621,7 +921,8 @@ def cmd_status(args):
 
 
 def cmd_ip(args):
-    print(get_public_ip())
+    # Exit IP when a session is up, otherwise the host IP.
+    print(exit_ip())
 
 
 def cmd_proposals(args):
@@ -787,6 +1088,12 @@ def main():
 
     p = sub.add_parser("daemon-stop", help="Stop the daemon")
     p.set_defaults(func=cmd_daemon_stop)
+
+    p = sub.add_parser("serve", help="Run the loopback control socket for the OpenCode plugin")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("up", help="Start the Mysterium node in proxy mode")
+    p.set_defaults(func=cmd_up)
 
     args = parser.parse_args()
     if not args.command:

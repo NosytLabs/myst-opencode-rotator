@@ -1,16 +1,17 @@
 {
-  "name": "myst-rotator",
+  "name": "@oma-ai/myst-rotator",
   "version": "1.0.0",
-  "description": "Auto-rotate residential IPs via Mysterium VPN when OpenCode hits rate limits",
+  "description": "OpenCode plugin — route model traffic through a Mysterium residential exit and rotate the IP on rate-limit (429) errors",
   "main": "index.js",
   "type": "module",
-  "keywords": ["opencode", "opencode-plugin", "mysterium", "vpn", "ip-rotation", "rate-limit"],
+  "keywords": ["opencode", "opencode-plugin", "mysterium", "ip-rotation", "proxy", "rate-limit", "residential"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/NosytLabs/myst-opencode-rotator.git"
   },
+  "files": ["index.js"],
   "peerDependencies": {
-    "@opencode-ai/plugin": "*"
+    "@opencode/plugin": ">=2.0.0"
   }
 }

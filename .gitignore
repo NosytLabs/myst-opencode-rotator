@@ -10,4 +10,5 @@ build/
 .env
 .venv/
 venv/
-data/
+data/node_modules/
+*.log
