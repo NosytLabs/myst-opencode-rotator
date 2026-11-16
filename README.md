@@ -40,6 +40,22 @@ Mysterium is a **decentralized VPN** with **20,000+ residential IPs** across **1
 
 ## Quick Start
 
+```bash
+# 1. Install the node + rotator (Docker + Foundry)
+curl -fsSL https://raw.githubusercontent.com/NosytLabs/myst-opencode-rotator/main/install.sh | bash
+
+# 2. Guided setup — creates identity, tells you where to send MYST + POL, registers on-chain
+myst-rotator setup
+
+# 3. Connect
+myst-rotator connect --country US
+curl ifconfig.me   # your new residential IP
+```
+
+`myst-rotator setup` walks you through everything (identity creation, funding
+address, on-chain registration via the transactor workaround below). Manual steps
+follow if you prefer.
+
 ### 1. Start the Mysterium node (Docker — easiest)
 
 ```bash
@@ -76,7 +92,15 @@ Where to get them:
 - **MYST**: Coinbase, Kraken, MEXC, Uniswap (Polygon). Send on **Polygon** (chain 137), not Ethereum mainnet
 - **POL**: Any exchange or Polygon faucet (~$0.05 is enough to start)
 
-The identity auto-registers once it has POL for gas.
+The identity auto-registers once it has POL for gas. **If it gets stuck
+`registration InProgress`** (a known, open Mysterium bug — [node#6190](https://github.com/mysteriumnetwork/node/issues/6190)),
+run the workaround:
+
+```bash
+myst-rotator register   # pre-funds the channel + registers directly on-chain with cast
+```
+
+See [The registration bug](#the-registration-bug) below for the full explanation.
 
 ### 4. Install the rotator
 
@@ -284,6 +308,49 @@ cd myst-opencode-rotator
 chmod +x myst_rotator.py
 sudo ln -s $(pwd)/myst_rotator.py /usr/local/bin/myst-rotator
 ```
+
+---
+
+## The registration bug (why `myst-rotator register` exists)
+
+Mysterium identity registration is handled by a **transactor service** that signs and
+submits a transaction on your behalf. This service frequently fails and leaves
+identities stuck `InProgress` forever — it is a known, open bug:
+[mysteriumnetwork/node#6190](https://github.com/mysteriumnetwork/node/issues/6190)
+(reproduced May–Oct 2026, still unfixed; verified on multiple fresh identities).
+
+The on-chain `Registry.registerIdentity()` has a second, subtler bug: it checks the
+**channel's** MYST balance *before* the channel contract is deployed:
+
+```solidity
+require(_totalFee <= token.balanceOf(getChannelAddress(_identity, _hermesId)),
+    "Registry: not enough funds in channel to cover fees");  // reverts: channel has no code yet
+_openChannel(_identity, _hermesId, _beneficiary, _totalFee);  // deploys the channel
+```
+
+`getChannelAddress()` is deterministic, but `balanceOf()` there is 0 until the
+contract exists — so direct registration always reverts.
+
+**The fix** (`myst-rotator register`): pre-fund the channel address with MYST
+*before* calling `registerIdentity()`, then submit the transactor-signed transaction
+directly on-chain with [`cast`](https://getfoundry.sh):
+
+1. Trigger the node's registration → the transactor signs the request
+2. Capture the signature + fee from the node's own logs
+3. Send ~1 MYST to the deterministic channel address (so the balance check passes)
+4. Submit `registerIdentity(...)` directly to the Registry contract
+
+Verified working on Polygon mainnet: identity registered, channel funded, ~0.928 MYST
+left after the transactor fee.
+
+---
+
+## VPN / P2P note
+
+The node needs direct UDP for its DHT/P2P layer. If you run a system VPN (Mullvad
+etc.) it can block P2P dials ("too few connections were built"). Allow the `myst`
+container outside the VPN (split tunnel / `mullvad-exclude`) or pause the VPN while
+connecting.
 
 ---
 

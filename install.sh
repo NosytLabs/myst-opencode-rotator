@@ -5,9 +5,9 @@ set -euo pipefail
 echo "=== Mysterium IP Rotator Installer ==="
 
 # 1. Check Docker / start myst node
-echo "[1/3] Checking Mysterium node..."
+echo "[1/4] Checking Mysterium node..."
 if ! command -v docker &>/dev/null; then
-  echo "  ERROR: Docker not installed. Install Docker first."
+  echo "  ERROR: Docker not installed. Install Docker first: https://docs.docker.com/get-docker/"
   exit 1
 fi
 
@@ -30,8 +30,24 @@ else
   sleep 5
 fi
 
-# 2. Install rotator
-echo "[2/3] Installing myst-rotator..."
+# 2. Install Foundry (cast) — needed for the registration workaround (node#6190)
+echo "[2/4] Checking Foundry (cast)..."
+if ! command -v cast &>/dev/null && [ ! -x "$HOME/.foundry/bin/cast" ]; then
+  echo "  Installing Foundry (cast)..."
+  curl -L https://foundry.paradigm.xyz -o /tmp/foundry-install.sh
+  bash /tmp/foundry-install.sh >/dev/null 2>&1
+  export PATH="$HOME/.foundry/bin:$PATH"
+  "$HOME/.foundry/bin/foundryup" >/dev/null 2>&1 || true
+fi
+if [ -x "$HOME/.foundry/bin/cast" ] || command -v cast &>/dev/null; then
+  echo "  cast ready."
+else
+  echo "  WARNING: cast not found. Registration workaround will be unavailable."
+  echo "    Install: curl -L https://foundry.paradigm.xyz | bash && foundryup"
+fi
+
+# 3. Install rotator
+echo "[3/4] Installing myst-rotator..."
 mkdir -p ~/.local/bin
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chmod +x "$SCRIPT_DIR/myst_rotator.py"
@@ -41,22 +57,13 @@ echo "  Installed to ~/.local/bin/myst-rotator"
 # Create config dir
 mkdir -p ~/.config/myst-rotator
 
-# 3. Check status
-echo "[3/3] Checking node status..."
-if curl -s http://127.0.0.1:4050/healthcheck | grep -q "uptime"; then
+# 4. Check status
+echo "[4/4] Checking node status..."
+if curl -s http://127.0.0.1:4050/healthcheck 2>/dev/null | grep -q "uptime"; then
   echo "  TequilAPI is live."
-  IDENTITY=$(curl -s http://127.0.0.1:4050/identities | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['identities'][0]['id'] if d.get('identities') else '')" 2>/dev/null || echo "")
+  IDENTITY=$(curl -s http://127.0.0.1:4050/identities 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['identities'][0]['id'] if d.get('identities') else '')" 2>/dev/null || echo "")
   if [ -n "$IDENTITY" ]; then
     echo "  Identity: $IDENTITY"
-    echo ""
-    echo "=== Fund your wallet ==="
-    echo "Send MYST + POL (on Polygon network) to:"
-    echo "  $IDENTITY"
-    echo ""
-    echo "~5 MYST (~$0.60) + ~0.5 POL (~$0.04) to start."
-    echo "Minimum: ~1 MYST + ~0.1 POL."
-  else
-    echo "  No identity yet. Run: myst-rotator identity"
   fi
 else
   echo "  WARNING: TequilAPI not reachable. Check: docker logs myst"
@@ -64,10 +71,10 @@ fi
 
 echo ""
 echo "=== Done! ==="
-echo "Quick start:"
-echo "  1. Fund wallet (send MYST + POL on Polygon to identity above)"
-echo "  2. myst-rotator balance        # check balance"
-echo "  3. myst-rotator connect        # connect to residential IP"
-echo "  4. myst-rotator status         # check status"
-echo "  5. myst-rotator rotate         # rotate to new IP"
-echo "  6. myst-rotator daemon         # auto-rotate every 10 min"
+echo "Next: run the guided setup (creates/uses identity, funds, registers on-chain):"
+echo "  myst-rotator setup"
+echo ""
+echo "Then:"
+echo "  myst-rotator connect --country US   # connect to residential IP"
+echo "  myst-rotator rotate                 # rotate to new IP"
+echo "  myst-rotator daemon --interval 600  # auto-rotate every 10 min"
