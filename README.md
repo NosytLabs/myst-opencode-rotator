@@ -26,12 +26,13 @@ Mysterium is a **decentralized VPN** with **20,000+ residential IPs** across **1
 |------|------|
 | MYST token price | ~$0.12 USD |
 | Data cost | ~3.29 MYST per GiB (~$0.40/GiB) |
-| **Minimum to start** | **~1 MYST (~$0.12)** + a little POL for gas |
+| **Minimum to start** | **~1 MYST (~$0.12)** + ~0.1 POL (~$0.01) for gas |
+| **Recommended to start** | **~5 MYST (~$0.60)** + ~0.5 POL (~$0.04) for gas |
 | AI coding (50-100 MB/day) | ~0.15-0.33 MYST/day (~$0.02-0.04/day) |
-| 10 MYST (~$1.20) lasts | ~30-60 days of daily AI coding |
+| 5 MYST (~$0.60) lasts | ~15-30 days of daily AI coding |
 | No subscription, no monthly fee | Pay only for what you use |
 
-**You can start with as little as 1 MYST (~$0.12) + ~0.1 POL (~$0.03) for gas.** That's enough to test. For serious use, 5-10 MYST (~$0.60-1.20) lasts weeks/months.
+**You can start with as little as 1 MYST (~$0.12) + ~0.1 POL (~$0.01) for gas.** We recommend 5 MYST + 0.5 POL for a smooth start. That's it — no monthly fees, no subscriptions.
 
 **No starter pack required.** Buy MYST on any exchange (Coinbase, Kraken, MEXC, etc.), send to your wallet address on **Polygon network**, and you're ready.
 
@@ -68,12 +69,12 @@ Send **both** tokens to your identity address **on Polygon network**:
 
 | Token | Amount | Why |
 |-------|--------|-----|
-| **MYST** | ~1-5 | Pay for VPN data (~3.29 MYST/GiB) |
-| **POL** | ~0.1-0.5 | Gas for registration + transactions |
+| **MYST** | ~5 (~$0.60) | Pay for VPN data (~3.29 MYST/GiB) |
+| **POL** | ~0.5 (~$0.04) | Gas for registration + transactions |
 
 Where to get them:
 - **MYST**: Coinbase, Kraken, MEXC, Uniswap (Polygon). Send on **Polygon** (chain 137), not Ethereum mainnet
-- **POL**: Any exchange or Polygon faucet (~$0.20 is enough)
+- **POL**: Any exchange or Polygon faucet (~$0.05 is enough to start)
 
 The identity auto-registers once it has POL for gas.
 
@@ -175,9 +176,33 @@ myst-rotator connect --country US
 opencode run -m "opencode/minimax-m3.1-flash-free" "hello"
 ```
 
-### Option B: With an OpenCode plugin (planned)
+### Option B: With the OpenCode plugin (auto-rotate on 429)
 
-A plugin that intercepts 429 responses and calls `myst-rotator rotate` automatically.
+The `opencode-plugin/` directory contains an OpenCode plugin that automatically
+rotates your IP when a 429 (rate limit) error is hit.
+
+**Install:**
+
+```bash
+# Method 1: npm (after publishing)
+opencode plugin myst-rotator
+
+# Method 2: Local install
+cd myst-opencode-rotator/opencode-plugin
+npm install
+npm link  # or: ln -s $(pwd) ~/.config/opencode/node_modules/myst-rotator
+```
+
+**Configure in `~/.config/opencode/opencode.json`:**
+
+```json
+{
+  "plugin": ["myst-rotator"]
+}
+```
+
+The plugin hooks into OpenCode's `chat.error` and `tool.error` events.
+When a 429 is detected, it calls `myst-rotator rotate` and retries the request.
 
 ### Option C: Split tunnel (advanced)
 
@@ -292,7 +317,7 @@ PRs welcome! Areas for improvement:
 - HTTP proxy server that auto-rotates on 429
 - Split-tunnel / policy routing (only route OpenCode traffic)
 - Docker Compose setup
-- Integration with OpenCode's plugin system
+- Publish plugin to npm as `myst-rotator`
 - Support for multiple concurrent tunnels (IP pool)
 
 ## License

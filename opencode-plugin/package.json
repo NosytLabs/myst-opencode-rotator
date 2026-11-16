@@ -1,0 +1,16 @@
+{
+  "name": "myst-rotator",
+  "version": "1.0.0",
+  "description": "Auto-rotate residential IPs via Mysterium VPN when OpenCode hits rate limits",
+  "main": "index.js",
+  "type": "module",
+  "keywords": ["opencode", "opencode-plugin", "mysterium", "vpn", "ip-rotation", "rate-limit"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NosytLabs/myst-opencode-rotator.git"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}

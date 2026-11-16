@@ -53,7 +53,8 @@ if curl -s http://127.0.0.1:4050/healthcheck | grep -q "uptime"; then
     echo "Send MYST + POL (on Polygon network) to:"
     echo "  $IDENTITY"
     echo ""
-    echo "~1-5 MYST (~$0.12-0.60) + ~0.1 POL (~$0.03) to start."
+    echo "~5 MYST (~$0.60) + ~0.5 POL (~$0.04) to start."
+    echo "Minimum: ~1 MYST + ~0.1 POL."
   else
     echo "  No identity yet. Run: myst-rotator identity"
   fi
