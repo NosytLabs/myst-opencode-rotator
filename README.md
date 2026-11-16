@@ -117,58 +117,38 @@ cd myst-opencode-rotator
 ./install.sh
 ```
 
-### 5. Connect & rotate
-
-```bash
-# Check balance
-myst-rotator balance
-
-# Connect to a random residential IP
-myst-rotator connect
-
-# Check your new IP
-myst-rotator ip
-
-# Rotate to a different country
-myst-rotator rotate
-
-# Auto-rotate every 10 minutes
-myst-rotator daemon --interval 600
-```
+Then see **Usage** below for the full command list.
 
 ---
 
 ## Usage
 
 ```bash
-# Connect to a specific country
+# Start the node (proxy mode, own network namespace)
+myst-rotator up
+
+# Guided setup: identity, funding address, on-chain registration
+myst-rotator setup
+
+# Connect to a residential exit
+myst-rotator connect
 myst-rotator connect --country US
 
-# Check status (connection, balance, identity)
+# Check status (exit IP, country, balance, identity)
 myst-rotator status
 
 # List available residential nodes
 myst-rotator proposals --country US
 
-# Rotate to new IP (different country)
+# Rotate to a new IP/country now
 myst-rotator rotate
 
-# Run as daemon (auto-rotates)
-myst-rotator daemon --interval 600
+# Control socket for the OpenCode plugin
+myst-rotator serve
 
-# Check daemon status
-myst-rotator daemon-status
-
-# Stop daemon
-myst-rotator daemon-stop
-
-# Check MYST balance
+# Check MYST balance / show identity / disconnect
 myst-rotator balance
-
-# Show identity address
 myst-rotator identity
-
-# Disconnect
 myst-rotator disconnect
 ```
 
@@ -177,30 +157,35 @@ myst-rotator disconnect
 ## How It Works
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  OpenCode   │────▶│  Mysterium Node  │────▶│  Residential IP │
-│  (or other) │     │  (WireGuard)     │     │  (real home)    │
-└─────────────┘     └──────────────────┘     └─────────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │  On 429:    │
-                    │  rotate()   │
-                    │  → new IP   │
-                    └─────────────┘
+┌──────────────┐   HTTP_PROXY   ┌───────────────────┐   WireGuard   ┌───────────────┐
+│   OpenCode   │───────────────▶│  Mysterium Node   │──────────────▶│ Residential   │
+│  (plugin)    │  (loopback)    │  (--proxymode)    │  (userspace)  │ exit IP       │
+└──────────────┘                └───────────────────┘               └───────────────┘
+                                        │
+                                   timer fires
+                                        ▼
+                                  rotate() → new exit
 ```
 
-1. The `myst` node (Docker) runs in consumer mode and exposes a TequilAPI on `127.0.0.1:4050`
-2. `myst-rotator connect` finds a residential node and creates a WireGuard tunnel through it
-3. All traffic from your machine routes through that residential IP
-4. When rate-limited (429), `myst-rotator rotate` switches to a new country/IP
-5. OpenCode retries with the new IP → succeeds
+1. The `myst` node (Docker) runs in its **own network namespace** with `--proxymode`,
+   exposing a local HTTP proxy on a loopback port plus TequilAPI on `127.0.0.1:4050`.
+2. `myst-rotator connect` picks a residential node and brings up a userspace WireGuard
+   tunnel to it.
+3. The plugin points `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` at that local proxy, so
+   OpenCode's provider calls leave through the residential IP. **Your own traffic is
+   never routed** — only what uses the proxy.
+4. A timer rotates to a fresh exit (default every 10 min), so an IP-scoped rate limit
+   is never reached. `/myst` rotates immediately.
+5. `myst-rotator serve` is the loopback control socket the plugin uses to read status
+   and trigger rotations.
 
 ---
 
 ## OpenCode Integration
 
 The plugin (`opencode-plugin/`) routes **all** OpenCode model traffic through the
-Mysterium residential exit and adds a `/myst` command to rotate the exit IP.
+Mysterium residential exit and rotates that exit **on a timer**, so IP-scoped
+rate limits are avoided rather than hit.
 
 ### Install
 
@@ -220,15 +205,40 @@ myst-rotator serve &
 curl -s -x http://127.0.0.1:$(myst-rotator status | grep -oP '"proxy": "\K[^"]+' | grep -oP ':\K[0-9]+') https://ipinfo.io/json
 ```
 
-Then start OpenCode. You should see, on load:
+Then start OpenCode. On load you should see:
 
 ```
 [myst-rotator] Routing through 94.154.102.62 (PL) via http://127.0.0.1:40815
+[myst-rotator] Auto-rotation every 10 min
 ```
 
-Run `/myst` in any session to rotate to a different residential IP.
+And each time the timer fires:
 
-### What the plugin does and does not do
+```
+[myst-rotator] timer: now 185.22.152.1 (NL) via http://127.0.0.1:40817
+```
+
+### Configuration
+
+Rotation interval and control socket can be set either way (plugin options win):
+
+```jsonc
+// ~/.config/opencode/opencode.json
+{
+  "plugin": [["myst-rotator", { "rotateEveryMin": 5 }]]
+}
+```
+
+```bash
+# or via environment
+export MYST_ROTATOR_EVERY_MIN=5        # minutes between rotations (0 = off)
+export MYST_ROTATOR_CONTROL=http://127.0.0.1:8787
+```
+
+Default is 10 minutes. Lower it if your provider's IP limit is tight; raise it if
+you want fewer session changes. Set `0` to disable the timer and rotate manually.
+
+### Why a timer instead of reacting to 429
 
 Verified against the live OpenCode plugin runtime (v2 API). At setup time the
 available domains are:
@@ -237,17 +247,23 @@ available domains are:
 options, agent, aisdk, catalog, command, integration, plugin, reference, skill
 ```
 
-- **Does:** apply `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` for the process at load,
-  so every provider call leaves through the residential exit. Exposes `/myst` to
-  rotate and report the new exit.
-- **Does not:** auto-retry a 429 on its own. This OpenCode build exposes **no
-  `session` domain and no `retry` hook** (`ctx.session` is `undefined`), so a
-  plugin cannot catch the 429 and re-issue the request by itself. Rotation on
-  rate limit is a manual `/myst` (or `myst-rotator rotate`) — the IP change is
-  what clears an IP-scoped rate limit.
+There is **no `session` domain and no `retry` hook** (`ctx.session` is `undefined`),
+so a plugin **cannot** catch a 429 and re-issue the request. Upstream
+`opencode-tunnel-switch` relies on `ctx.session.hook("retry", ...)`, which only
+exists in builds that expose it — copying that design would silently do nothing.
 
-This matches the upstream `opencode-tunnel-switch` design, whose `retry` hook
-exists only in builds that expose `ctx.session.hook`.
+Rotating on a timer is the correct answer anyway: for an IP-scoped limit you get a
+fresh IP *before* the limit is reached, so the 429 never happens. Run `/myst` in
+any session to rotate immediately.
+
+### Tests
+
+```bash
+python3 tests/test_plugin_timer.py
+```
+
+Loads the real plugin against a mock control socket and asserts the timer fires,
+the exit changes, and the proxy env is re-pointed — no funded identity required.
 
 ### Rate limits worth knowing
 

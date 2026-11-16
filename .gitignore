@@ -1,14 +1,24 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.venv/
+venv/
+
+# Build output
 dist/
 build/
 .eggs/
+
+# Local state and secrets
 *.log
 *.pid
 .env
-.venv/
-venv/
-data/node_modules/
-*.log
+
+# Test scratch
+tests/_*.tmp

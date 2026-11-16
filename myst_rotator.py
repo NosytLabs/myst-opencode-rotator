@@ -29,7 +29,8 @@ Usage:
   myst-rotator proposals [--country US]  # List available residential nodes
   myst-rotator balance                   # Show MYST balance (wallet + channel)
   myst-rotator identity                  # Show identity address
-  myst-rotator daemon [--interval 600]   # Auto-rotate every N seconds
+  myst-rotator serve                     # Loopback control socket for the plugin
+  myst-rotator up                        # Start the node in proxy mode
 """
 
 import argparse
@@ -57,7 +58,6 @@ RPC_URL = os.environ.get("MYST_RPC", "https://polygon1.mysterium.network/")
 
 CONFIG_DIR = Path.home() / ".config" / "myst-rotator"
 LOG_FILE = CONFIG_DIR / "rotator.log"
-PID_FILE = CONFIG_DIR / "daemon.pid"
 IDENTITY_FILE = CONFIG_DIR / "identity.txt"
 PASSPHRASE_FILE = CONFIG_DIR / "passphrase.txt"  # 0600
 
@@ -963,80 +963,6 @@ def cmd_identity(args):
         sys.exit(1)
 
 
-def cmd_daemon(args):
-    interval = args.interval or 600
-    ensure_config_dir()
-
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-    def cleanup(signum, frame):
-        log("Daemon stopping (signal received).")
-        if PID_FILE.exists():
-            PID_FILE.unlink()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, cleanup)
-    signal.signal(signal.SIGINT, cleanup)
-
-    log(f"Daemon started (interval: {interval}s, PID: {os.getpid()})")
-
-    conn_status = get_connection_status()
-    if not conn_status.get("connected"):
-        rotate()
-
-    try:
-        while True:
-            time.sleep(interval)
-            log(f"Scheduled rotation (every {interval}s)")
-            rotate()
-    except KeyboardInterrupt:
-        log("Daemon stopped by user.")
-    finally:
-        if PID_FILE.exists():
-            PID_FILE.unlink()
-
-
-def cmd_daemon_status(args):
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text().strip())
-            os.kill(pid, 0)
-            print(f"Daemon running (PID: {pid})")
-            sys.exit(0)
-        except (ProcessLookupError, ValueError):
-            print("Daemon not running (stale PID file).")
-            sys.exit(1)
-    else:
-        print("Daemon not running.")
-        sys.exit(1)
-
-
-def cmd_daemon_stop(args):
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
-            print(f"Daemon stopped (PID: {pid}).")
-            for _ in range(10):
-                try:
-                    os.kill(pid, 0)
-                    time.sleep(0.5)
-                except ProcessLookupError:
-                    break
-            if PID_FILE.exists():
-                PID_FILE.unlink()
-            sys.exit(0)
-        except (ProcessLookupError, ValueError):
-            print("Daemon not running (stale PID file).")
-            if PID_FILE.exists():
-                PID_FILE.unlink()
-            sys.exit(1)
-    else:
-        print("Daemon not running.")
-        sys.exit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Mysterium IP Rotator for OpenCode",
@@ -1078,16 +1004,6 @@ def main():
 
     p = sub.add_parser("identity", help="Show/create identity address")
     p.set_defaults(func=cmd_identity)
-
-    p = sub.add_parser("daemon", help="Run auto-rotation daemon")
-    p.add_argument("--interval", "-i", type=int, default=600, help="Rotation interval in seconds (default: 600)")
-    p.set_defaults(func=cmd_daemon)
-
-    p = sub.add_parser("daemon-status", help="Check daemon status")
-    p.set_defaults(func=cmd_daemon_status)
-
-    p = sub.add_parser("daemon-stop", help="Stop the daemon")
-    p.set_defaults(func=cmd_daemon_stop)
 
     p = sub.add_parser("serve", help="Run the loopback control socket for the OpenCode plugin")
     p.set_defaults(func=cmd_serve)
